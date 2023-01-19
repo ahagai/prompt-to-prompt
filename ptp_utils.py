@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
@@ -19,6 +19,7 @@ import cv2
 from typing import Optional, Union, Tuple, List, Callable, Dict
 from IPython.display import display
 from tqdm.notebook import tqdm
+import inspect
 
 
 def text_under_image(image: np.ndarray, text: str, text_color: Tuple[int, int, int] = (0, 0, 0)):
@@ -30,11 +31,11 @@ def text_under_image(image: np.ndarray, text: str, text_color: Tuple[int, int, i
     img[:h] = image
     textsize = cv2.getTextSize(text, font, 1, 2)[0]
     text_x, text_y = (w - textsize[0]) // 2, h + offset - textsize[1] // 2
-    cv2.putText(img, text, (text_x, text_y ), font, 1, text_color, 2)
+    cv2.putText(img, text, (text_x, text_y), font, 1, text_color, 2)
     return img
 
 
-def view_images(images, num_rows=1, offset_ratio=0.02):
+def view_images(images, num_rows=1, offset_ratio=0.02, title=""):
     if type(images) is list:
         num_empty = len(images) % num_rows
     elif images.ndim == 4:
@@ -45,6 +46,9 @@ def view_images(images, num_rows=1, offset_ratio=0.02):
 
     empty_images = np.ones(images[0].shape, dtype=np.uint8) * 255
     images = [image.astype(np.uint8) for image in images] + [empty_images] * num_empty
+    # for image in images:
+    #     plt.imshow(image)
+    #     plt.show()
     num_items = len(images)
 
     h, w, c = images[0].shape
@@ -58,7 +62,14 @@ def view_images(images, num_rows=1, offset_ratio=0.02):
                 i * num_cols + j]
 
     pil_img = Image.fromarray(image_)
-    display(pil_img)
+    if title == "":
+        title = "a"
+    pil_img.save(f"/cnvrg/{title}.jpg")
+    # display(pil_img)
+    # plt.imshow(pil_img)
+    # plt.title(title)
+    # plt.tight_layout()
+    # plt.show()
 
 
 def diffusion_step(model, controller, latents, context, t, guidance_scale, low_resource=False):
@@ -90,51 +101,51 @@ def init_latent(latent, model, height, width, generator, batch_size):
             (1, model.unet.in_channels, height // 8, width // 8),
             generator=generator,
         )
-    latents = latent.expand(batch_size,  model.unet.in_channels, height // 8, width // 8).to(model.device)
+    latents = latent.expand(batch_size, model.unet.in_channels, height // 8, width // 8).to(model.device)
     return latent, latents
 
 
 @torch.no_grad()
 def text2image_ldm(
-    model,
-    prompt:  List[str],
-    controller,
-    num_inference_steps: int = 50,
-    guidance_scale: Optional[float] = 7.,
-    generator: Optional[torch.Generator] = None,
-    latent: Optional[torch.FloatTensor] = None,
+        model,
+        prompt: List[str],
+        controller,
+        num_inference_steps: int = 50,
+        guidance_scale: Optional[float] = 7.,
+        generator: Optional[torch.Generator] = None,
+        latent: Optional[torch.FloatTensor] = None,
 ):
     register_attention_control(model, controller)
     height = width = 256
     batch_size = len(prompt)
-    
+
     uncond_input = model.tokenizer([""] * batch_size, padding="max_length", max_length=77, return_tensors="pt")
     uncond_embeddings = model.bert(uncond_input.input_ids.to(model.device))[0]
-    
+
     text_input = model.tokenizer(prompt, padding="max_length", max_length=77, return_tensors="pt")
     text_embeddings = model.bert(text_input.input_ids.to(model.device))[0]
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
     context = torch.cat([uncond_embeddings, text_embeddings])
-    
+
     model.scheduler.set_timesteps(num_inference_steps)
     for t in tqdm(model.scheduler.timesteps):
         latents = diffusion_step(model, controller, latents, context, t, guidance_scale)
-    
+
     image = latent2image(model.vqvae, latents)
-   
+
     return image, latent
 
 
 @torch.no_grad()
 def text2image_ldm_stable(
-    model,
-    prompt: List[str],
-    controller,
-    num_inference_steps: int = 50,
-    guidance_scale: float = 7.5,
-    generator: Optional[torch.Generator] = None,
-    latent: Optional[torch.FloatTensor] = None,
-    low_resource: bool = False,
+        model,
+        prompt: List[str],
+        controller,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 7.5,
+        generator: Optional[torch.Generator] = None,
+        latent: Optional[torch.FloatTensor] = None,
+        low_resource: bool = False,
 ):
     register_attention_control(model, controller)
     height = width = 512
@@ -153,20 +164,23 @@ def text2image_ldm_stable(
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
     uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
-    
+
     context = [uncond_embeddings, text_embeddings]
     if not low_resource:
         context = torch.cat(context)
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
-    
-    # set timesteps
-    extra_set_kwargs = {"offset": 1}
+
+    # init the scheduler
+    accepts_offset = "offset" in set(inspect.signature(model.scheduler.set_timesteps).parameters.keys())
+    extra_set_kwargs = {}
+    if accepts_offset:
+        extra_set_kwargs["offset"] = 1
     model.scheduler.set_timesteps(num_inference_steps, **extra_set_kwargs)
     for t in tqdm(model.scheduler.timesteps):
         latents = diffusion_step(model, controller, latents, context, t, guidance_scale, low_resource)
-    
+
     image = latent2image(model.vae, latents)
-  
+
     return image, latent
 
 
@@ -179,6 +193,7 @@ def register_attention_control(model, controller):
             to_out = self.to_out
 
         def forward(x, context=None, mask=None):
+
             batch_size, sequence_length, dim = x.shape
             h = self.heads
             q = self.to_q(x)
@@ -201,6 +216,7 @@ def register_attention_control(model, controller):
             # attention, what we cannot get enough of
             attn = sim.softmax(dim=-1)
             attn = controller(attn, is_cross, place_in_unet)
+
             out = torch.einsum("b i j, b j d -> b i d", attn, v)
             out = self.reshape_batch_dim_to_heads(out)
             return to_out(out)
@@ -239,7 +255,7 @@ def register_attention_control(model, controller):
 
     controller.num_att_layers = cross_att_count
 
-    
+
 def get_word_inds(text: str, word_place: int, tokenizer):
     split_text = text.split(" ")
     if type(word_place) is str:
@@ -262,7 +278,7 @@ def get_word_inds(text: str, word_place: int, tokenizer):
 
 
 def update_alpha_time_word(alpha, bounds: Union[float, Tuple[float, float]], prompt_ind: int,
-                           word_inds: Optional[torch.Tensor]=None):
+                           word_inds: Optional[torch.Tensor] = None):
     if type(bounds) is float:
         bounds = 0, bounds
     start, end = int(bounds[0] * alpha.shape[0]), int(bounds[1] * alpha.shape[0])
@@ -287,9 +303,9 @@ def get_time_words_attention_alpha(prompts, num_steps,
                                                   i)
     for key, item in cross_replace_steps.items():
         if key != "default_":
-             inds = [get_word_inds(prompts[i], key, tokenizer) for i in range(1, len(prompts))]
-             for i, ind in enumerate(inds):
-                 if len(ind) > 0:
+            inds = [get_word_inds(prompts[i], key, tokenizer) for i in range(1, len(prompts))]
+            for i, ind in enumerate(inds):
+                if len(ind) > 0:
                     alpha_time_words = update_alpha_time_word(alpha_time_words, item, i, ind)
     alpha_time_words = alpha_time_words.reshape(num_steps + 1, len(prompts) - 1, 1, 1, max_num_words)
     return alpha_time_words
