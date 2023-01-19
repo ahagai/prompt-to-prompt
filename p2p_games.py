@@ -15,8 +15,8 @@ import transformers
 import diffusers
 
 from PIL import Image
-print(transformers.__version__) # should be 4.24.0
-print(diffusers.__version__) # should be 0.3.0
+print(transformers.__version__) # should be transformers==4.24.0
+print(diffusers.__version__) # should be diffusers==0.3.0
 
 MY_TOKEN = '<replace with your token>'
 LOW_RESOURCE = False
