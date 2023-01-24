@@ -13,6 +13,7 @@ import random
 import os
 import transformers
 import diffusers
+from clip_similarity import ClipSimilarity
 
 from PIL import Image
 print(transformers.__version__) # should be transformers==4.24.0
@@ -27,9 +28,9 @@ device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 ldm_stable = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4").to(device)
 tokenizer = ldm_stable.tokenizer
 
-prompts = ["a man smiling over a mountain view",
-           "a man wearing a hat smiling over a mountain view"
-           ]
+# prompts = ["a man smiling over a mountain view",
+#            "a man wearing a hat smiling over a mountain view"
+#            ]
 
 
 class LocalBlend:
@@ -413,84 +414,156 @@ seed = 8888
 #
 
 
-def main(seeds_arr, weights_arr):
-    for seed in seeds_arr: #list(range(8, 100)):
-        x_1 = None
-        start_with_no_makeup = []
 
-        start_with_makeup = []
-        folder = "reweight"
-        if not os.path.exists(f"/cnvrg/{folder}"):
-            os.mkdir(f"/cnvrg/{folder}")
+def general_generation_exp_pipe(seeds_arr, weights_arr):
+    global GUIDANCE_SCALE
+    # cross_replace_vals = 0.7
+    for gc in [5, 7.5, 10, 15]:
+        GUIDANCE_SCALE = gc
+        for cross_replace_vals in [0.6, 0.8, 0.9]:
+            for seed in seeds_arr:  # list(range(8, 100)):
+                x_1 = None
+                start_with_no_makeup = []
+
+                start_with_makeup = []
+                folder = f"reweight/{seed}_{cross_replace_vals}_{gc}_mask"
+                if not os.path.exists(f"/cnvrg/{folder}"):
+                    os.mkdir(f"/cnvrg/{folder}")
+
+                diff_folder = f"{folder}/diff"
+                if not os.path.exists(f"/cnvrg/{diff_folder}"):
+                    os.mkdir(f"/cnvrg/{diff_folder}")
+                g_cpu = torch.Generator().manual_seed(seed)
+
+                for weight in weights_arr:  # , 0.6, 1, 3, 6, 10, 20, 50, 150]:
+                    print(f"weight - {weight}")
+                    prompts = [
+                        "close up face shot of a woman , beautiful, classic",
+                        "close up face shot of a woman wearing an elegant venetian mask, beautiful, classic"]
+                    if x_1 is not None:
+                        g_cpu.set_state(x_1)
+
+                    equalizer = get_equalizer(prompts[0], ("mask",), (weight,))
+                    print(equalizer[equalizer != 1])
+
+                    controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS,
+                                                   cross_replace_steps={"default_": cross_replace_vals},
+                                                   self_replace_steps=.2, local_blend=None, equalizer=equalizer)
+
+                    image, x_t = run_and_display(prompts, controller, latent=None, generator=g_cpu)
+                    # show_cross_attention(controller, res=16, from_where=("up", "down"), name=f"{folder}/croos_attn_{seed}_w_o_local_blend_{weight}")
+
+                    # Image.fromarray(np.hstack((image[0], image[1]))).save(f"/cnvrg/{folder}/{seed}_w_o_local_blend_{weight}.jpg")
+                    # Image.fromarray(image[0]).save(f"/cnvrg/{folder}/{seed}_0_w_o_local_blend_{weight}.jpg")
+                    if x_1 is not None and len(start_with_no_makeup) == 0:
+                        diff = np.abs((image[1].astype("float32") - image[0].astype("float32"))).astype("uint8")
+                        Image.fromarray(diff).save(f"{diff_folder}/diff_makeup_weight_{weight}.png")
+                        im = np.vstack([image[0], diff])
+                        start_with_no_makeup.append(im)
+                        Image.fromarray(image[0]).save(f"{folder}/start_no_makeup.png")
+
+                    # Image.fromarray(image[1]).save(f"/cnvrg/{folder}/{seed}_1_w_o_local_blend_{weight}.jpg")
+                    if x_1 is not None:
+                        diff = np.abs((image[1].astype("float32") - image[0].astype("float32"))).astype("uint8")
+                        Image.fromarray(diff).save(f"{diff_folder}/diff_makeup_weight_{weight}.png")
+                        im = np.vstack([image[1], diff])
+                        start_with_no_makeup.append(im)
+                        Image.fromarray(image[1]).save(f"{folder}/result_no_makeup_weight_{weight}.png")
+
+                    diff = np.abs((image[1].astype("float32") - image[0].astype("float32"))).astype("uint8")
+                    Image.fromarray(diff).save(f"{diff_folder}/diff_no_makeup_weight_{weight}.png")
+
+                    prompts = prompts[::-1]
+
+                    if x_1 is not None:
+                        g_cpu.set_state(x_1)
+                    else:
+                        print("getting x_1")
+                        x_1 = g_cpu.get_state().clone()
+                        continue
+
+                    equalizer = get_equalizer(prompts[0], ("makeup",), (weight,))
+                    print(equalizer[equalizer != 1])
+                    controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS,
+                                                   cross_replace_steps={"default_": cross_replace_vals},
+                                                   self_replace_steps=.2, local_blend=None, equalizer=equalizer)
+
+                    image, x_t = run_and_display(prompts, controller, latent=None, generator=g_cpu)
+
+                    # Image.fromarray(np.hstack((image[0], image[1]))).save(f"/cnvrg/{folder}/{seed}_w_o_local_blend_reverse_order_of_prompts_{weight}.jpg")
+                    # Image.fromarray(image[0]).save(f"/cnvrg/{folder}/{seed}_0_w_o_local_blend_reverse_order_of_prompts_{weight}.jpg")
+                    if len(start_with_makeup) == 0 and x_1 is not None:
+                        diff = np.abs((image[1].astype("float32") - image[0].astype("float32"))).astype("uint8")
+                        Image.fromarray(diff).save(f"{diff_folder}/diff_makeup_weight_{weight}.png")
+                        im = np.vstack([image[0], diff])
+                        start_with_makeup.append(im)
+                        Image.fromarray(image[0]).save(f"{folder}/start_makeup.png")
+                    # Image.fromarray(image[1]).save(f"/cnvrg/{folder}/{seed}_1_w_o_local_blend_reverse_order_of_prompts_{weight}.jpg")
+
+                    if x_1 is not None:
+                        diff = np.abs((image[1].astype("float32") - image[0].astype("float32"))).astype("uint8")
+                        Image.fromarray(diff).save(f"{diff_folder}/diff_makeup_weight_{weight}.png")
+                        im = np.vstack([image[1], diff])
+                        start_with_makeup.append(im)
+                        Image.fromarray(image[1]).save(f"{folder}/result_makeup_weight_{weight}.png")
+
+                    diff = np.abs((image[1].astype("float32") - image[0].astype("float32"))).astype("uint8")
+                    Image.fromarray(diff).save(f"{diff_folder}/diff_makeup_weight_{weight}.png")
+
+                print(f"len(start with no makeup) = {len(start_with_no_makeup)}")
+                np_im = np.hstack(start_with_no_makeup)
+                im = Image.fromarray(np_im)
+                im.save(f"/cnvrg/{folder}/{seed}_starting_without_makeup.jpg")
+
+                print(f"len(start with makeup) = {len(start_with_makeup)}")
+
+                np_im = np.hstack(start_with_makeup)
+                im = Image.fromarray(np_im)
+                im.save(f"/cnvrg/{folder}/{seed}_starting_with_makeup.jpg")
+                x_1 = None
+
+def choose_couples_by_clip_sim(prompts, seeds, weights, eq_val):
+    clip_similarity_metric = ClipSimilarity()
+    cross_replace_vals = 0.6
+    folder = "/cnvrg/couples/"
+    images_sim_arr =[]
+    if not os.path.exists(folder):
+        os.mkdir(folder)
+    for seed in seeds:
         g_cpu = torch.Generator().manual_seed(seed)
 
-        for weight in weights_arr : #, 0.6, 1, 3, 6, 10, 20, 50, 150]:
+        for weight in weights:  # , 0.6, 1, 3, 6, 10, 20, 50, 150]:
             print(f"weight - {weight}")
-            prompts = [
-                "close up photo of a woman without makeup , brown eyes, strong jaw, high cheek, nice nose ",
-                "close up photo of a woman with makeup , brown eyes, strong jaw, high cheek, nice nose"]
-            if x_1 is not None:
-                g_cpu.set_state(x_1)
 
-
-            equalizer = get_equalizer(prompts[0], ("makeup",), (weight,))
+            equalizer = get_equalizer(prompts[0], (eq_val,), (weight,))
             print(equalizer[equalizer != 1])
 
             controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS,
-                                         cross_replace_steps={"default_": 0.6},
-                                         self_replace_steps=.2, local_blend=None, equalizer=equalizer)
+                                           cross_replace_steps={"default_": cross_replace_vals},
+                                           self_replace_steps=.2, local_blend=None, equalizer=equalizer)
 
             image, x_t = run_and_display(prompts, controller, latent=None, generator=g_cpu)
-            # show_cross_attention(controller, res=16, from_where=("up", "down"), name=f"{folder}/croos_attn_{seed}_w_o_local_blend_{weight}")
-
-            # Image.fromarray(np.hstack((image[0], image[1]))).save(f"/cnvrg/{folder}/{seed}_w_o_local_blend_{weight}.jpg")
-            # Image.fromarray(image[0]).save(f"/cnvrg/{folder}/{seed}_0_w_o_local_blend_{weight}.jpg")
-            if x_1 is not None and len(start_with_no_makeup) == 0:
-                start_with_no_makeup.append(image[0])
-            # Image.fromarray(image[1]).save(f"/cnvrg/{folder}/{seed}_1_w_o_local_blend_{weight}.jpg")
-            if x_1 is not None:
-                start_with_no_makeup.append(image[1])
-
+            image_1 = Image.fromarray(image[0])
+            image_2 = Image.fromarray(image[1])
+            image_1.save(f"{folder}_{seed}_{weight}_0.png")
+            image_2.save(f"{folder}_{seed}_{weight}_1.png")
+            _, _, sim, sim_images = clip_similarity_metric(image_1, image_2, [prompts[0]], [prompts[1]])
+            images_sim_arr.append((image_1, image_2, sim))
+            print(f"similarity as i want {sim}")
+            print(f"similarity between images {sim_images}")
 
 
-            prompts = prompts[::-1]
-
-            if x_1 is not None:
-                g_cpu.set_state(x_1)
-            else:
-                print("getting x_1")
-                x_1 = g_cpu.get_state().clone()
-                continue
-
-            equalizer = get_equalizer(prompts[0], ("makeup",), (weight,))
-            print(equalizer[equalizer != 1])
-            controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS,
-                                         cross_replace_steps={"default_": 0.6},
-                                         self_replace_steps=.2, local_blend=None, equalizer=equalizer)
-
-            image, x_t = run_and_display(prompts, controller, latent=None, generator=g_cpu)
 
 
-            # Image.fromarray(np.hstack((image[0], image[1]))).save(f"/cnvrg/{folder}/{seed}_w_o_local_blend_reverse_order_of_prompts_{weight}.jpg")
-            # Image.fromarray(image[0]).save(f"/cnvrg/{folder}/{seed}_0_w_o_local_blend_reverse_order_of_prompts_{weight}.jpg")
-            if len(start_with_makeup) == 0 and x_1 is not None:
-                start_with_makeup.append(image[0])
-            # Image.fromarray(image[1]).save(f"/cnvrg/{folder}/{seed}_1_w_o_local_blend_reverse_order_of_prompts_{weight}.jpg")
 
-            if  x_1 is not None:
-                start_with_makeup.append(image[1])
 
-        print(f"len(start with no makeup) = {len(start_with_no_makeup)}")
-        np_im = np.hstack(start_with_no_makeup)
-        im = Image.fromarray(np_im)
-        im.save(f"/cnvrg/{folder}/{seed}_starting_without_makeup.jpg")
-
-        print(f"len(start with makeup) = {len(start_with_makeup)}")
-
-        np_im = np.hstack(start_with_makeup)
-        im = Image.fromarray(np_im)
-        im.save(f"/cnvrg/{folder}/{seed}_starting_with_makeup.jpg")
-        x_1 = None
+def main():
+    prompts = [
+        "close up face shot of a woman , beautiful, classic",
+        "close up face shot of a woman wearing an elegant venetian mask, beautiful, classic"]
+    eq_val = "makeup"
+    choose_couples_by_clip_sim(prompts, list(range(10)), [1], eq_val)
+    # general_generation_exp_pipe(list(range(10)), [0, 1, 2, 5])
 
 if __name__ == "__main__":
     main()
