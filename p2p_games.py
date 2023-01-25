@@ -14,6 +14,7 @@ import os
 import transformers
 import diffusers
 from clip_similarity import ClipSimilarity
+import torch.nn.functional as F
 
 from PIL import Image
 print(transformers.__version__) # should be transformers==4.24.0
@@ -25,7 +26,11 @@ NUM_DIFFUSION_STEPS = 50
 GUIDANCE_SCALE = 7.5
 MAX_NUM_WORDS = 77
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-ldm_stable = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4").to(device)
+model_id = "stabilityai/stable-diffusion-2-1"
+model_base_id = "CompVis/stable-diffusion-v1-4"
+ldm_stable = StableDiffusionPipeline.from_pretrained(model_id).to(device)
+# ldm_stable("a b c")
+print("done")
 tokenizer = ldm_stable.tokenizer
 
 # prompts = ["a man smiling over a mountain view",
@@ -522,17 +527,19 @@ def general_generation_exp_pipe(seeds_arr, weights_arr):
                 im.save(f"/cnvrg/{folder}/{seed}_starting_with_makeup.jpg")
                 x_1 = None
 
-def choose_couples_by_clip_sim(prompts, seeds, weights, eq_val):
+def choose_couples_by_clip_sim(prompts, seeds, weights, eq_val, max_num_of_images, cross_replace_vals = 0.6):
     clip_similarity_metric = ClipSimilarity()
-    cross_replace_vals = 0.6
+
     folder = "/cnvrg/couples/"
-    images_sim_arr =[]
+    images_arr =[]
+    images_sim_arr = []
     if not os.path.exists(folder):
         os.mkdir(folder)
     for seed in seeds:
+        print(seed)
         g_cpu = torch.Generator().manual_seed(seed)
 
-        for weight in weights:  # , 0.6, 1, 3, 6, 10, 20, 50, 150]:
+        for weight in weights:
             print(f"weight - {weight}")
 
             equalizer = get_equalizer(prompts[0], (eq_val,), (weight,))
@@ -545,24 +552,49 @@ def choose_couples_by_clip_sim(prompts, seeds, weights, eq_val):
             image, x_t = run_and_display(prompts, controller, latent=None, generator=g_cpu)
             image_1 = Image.fromarray(image[0])
             image_2 = Image.fromarray(image[1])
-            image_1.save(f"{folder}_{seed}_{weight}_0.png")
-            image_2.save(f"{folder}_{seed}_{weight}_1.png")
+            image_1.save(f"{folder}/{seed}_{weight}_0.png")
+            image_2.save(f"{folder}/{seed}_{weight}_1.png")
             _, _, sim, sim_images = clip_similarity_metric(image_1, image_2, [prompts[0]], [prompts[1]])
-            images_sim_arr.append((image_1, image_2, sim))
+            images_sim_arr.append(sim)
+            images_arr.append((image_1, image_2))
             print(f"similarity as i want {sim}")
             print(f"similarity between images {sim_images}")
 
+    images_sim_arr = torch.tensor(images_sim_arr)
+    sorted_values, indices = images_sim_arr.sort(descending=True)
+    for i, images in enumerate(images_arr):
+        images_arr[i] = np.vstack(images)
+    images_sorted_arr = []
+    for i, ind in enumerate(indices):
+        if i > max_num_of_images:
+            break
+        images_sorted_arr.append(images_arr[ind])
+    images_sorted_arr = np.hstack(images_sorted_arr)
+    print(images_sorted_arr.shape)
+    Image.fromarray(images_sorted_arr).save(f"{folder}/sorted.png")
 
+    print(indices)
+    print(sorted_values)
 
 
 
 
 def main():
     prompts = [
-        "close up face shot of a woman , beautiful, classic",
-        "close up face shot of a woman wearing an elegant venetian mask, beautiful, classic"]
+        "close up face photo, portrait, face centered  of a woman , beautiful, classic",
+        "close up face photo, portrait, face centered of a woman wearing an elegant venetian mask, beautiful, classic"]
     eq_val = "makeup"
-    choose_couples_by_clip_sim(prompts, list(range(10)), [1], eq_val)
+    samples = 15
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    choose_couples_by_clip_sim(prompts, list(range(samples)), [2], eq_val, max_num_of_images=20, cross_replace_vals=0.4)
+    end.record()
+    torch.cuda.synchronize()
+
+    print(f"elapsed time in milliseconds for {samples} samples  - {start.elapsed_time(end)}")
+    print(f"elapsed time in seconds for {samples} samples  - {start.elapsed_time(end) / 1000}")
+    print(f"average time per sample in sec - {start.elapsed_time(end) / (1000 * samples)}")
     # general_generation_exp_pipe(list(range(10)), [0, 1, 2, 5])
 
 if __name__ == "__main__":

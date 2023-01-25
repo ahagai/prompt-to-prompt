@@ -20,6 +20,7 @@ from typing import Optional, Union, Tuple, List, Callable, Dict
 from IPython.display import display
 from tqdm.notebook import tqdm
 import inspect
+import torch.nn.functional as F
 
 
 def text_under_image(image: np.ndarray, text: str, text_color: Tuple[int, int, int] = (0, 0, 0)):
@@ -78,6 +79,7 @@ def diffusion_step(model, controller, latents, context, t, guidance_scale, low_r
         noise_prediction_text = model.unet(latents, t, encoder_hidden_states=context[1])["sample"]
     else:
         latents_input = torch.cat([latents] * 2)
+        # x = model.unet(latents_input, t, encoder_hidden_states=context).sample
         noise_pred = model.unet(latents_input, t, encoder_hidden_states=context)["sample"]
         noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
     noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
@@ -185,6 +187,10 @@ def text2image_ldm_stable(
 
 
 def register_attention_control(model, controller):
+
+
+
+
     def ca_forward(self, place_in_unet):
         to_out = self.to_out
         if type(to_out) is torch.nn.modules.container.ModuleList:
@@ -192,26 +198,28 @@ def register_attention_control(model, controller):
         else:
             to_out = self.to_out
 
-        def forward(x, context=None, mask=None):
+
+
+        def forward(x, encoder_hidden_states=None, attention_mask=None):
 
             batch_size, sequence_length, dim = x.shape
             h = self.heads
             q = self.to_q(x)
-            is_cross = context is not None
-            context = context if is_cross else x
-            k = self.to_k(context)
-            v = self.to_v(context)
+            is_cross = encoder_hidden_states is not None
+            encoder_hidden_states = encoder_hidden_states if is_cross else x
+            k = self.to_k(encoder_hidden_states)
+            v = self.to_v(encoder_hidden_states)
             q = self.reshape_heads_to_batch_dim(q)
             k = self.reshape_heads_to_batch_dim(k)
             v = self.reshape_heads_to_batch_dim(v)
 
             sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale
 
-            if mask is not None:
-                mask = mask.reshape(batch_size, -1)
+            if attention_mask is not None:
+                attention_mask = attention_mask.reshape(batch_size, -1)
                 max_neg_value = -torch.finfo(sim.dtype).max
-                mask = mask[:, None, :].repeat(h, 1, 1)
-                sim.masked_fill_(~mask, max_neg_value)
+                attention_mask = attention_mask[:, None, :].repeat(h, 1, 1)
+                sim.masked_fill_(~attention_mask, max_neg_value)
 
             # attention, what we cannot get enough of
             attn = sim.softmax(dim=-1)
@@ -219,6 +227,8 @@ def register_attention_control(model, controller):
 
             out = torch.einsum("b i j, b j d -> b i d", attn, v)
             out = self.reshape_batch_dim_to_heads(out)
+
+
             return to_out(out)
 
         return forward
